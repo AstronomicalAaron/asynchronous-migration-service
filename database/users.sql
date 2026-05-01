@@ -1,0 +1,8 @@
+CREATE TABLE users (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    first_name VARCHAR(255) NULL,
+    last_name VARCHAR(255) NULL,
+    created_at DATETIME NULL,
+    updated_at DATETIME NULL
+);

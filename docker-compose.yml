@@ -1,0 +1,92 @@
+services:
+  api:
+    build: .
+    container_name: migration-api
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./app:/app/app
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: migration_control
+      MYSQL_USER: migration_user
+      MYSQL_PASSWORD: migration_pass
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DATABASE: migration_artifacts
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    container_name: migration-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: migration_control
+      MYSQL_USER: migration_user
+      MYSQL_PASSWORD: migration_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    container_name: migration-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: migration-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: migration-worker
+    command: [ "python", "-m", "app.worker" ]
+    volumes:
+      - ./app:/app/app
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: migration_control
+      MYSQL_USER: migration_user
+      MYSQL_PASSWORD: migration_pass
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DATABASE: migration_artifacts
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  mongo_data:
+  redis_data:
