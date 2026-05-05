@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -130,9 +132,28 @@ def ensure_mongo_indexes() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--count", type=int, default=2)
+    args = parser.parse_args()
+
     ensure_mongo_indexes()
     engine = mysql_admin_engine()
-    tenants = build_seed_tenants()
+
+    tenants = [
+        SeedTenant(
+            tenant_id=str(uuid4()),
+            display_name=f"Tenant {i + 1}",
+            users=[
+                {
+                    "email": f"user{i}_{j}@example.com",
+                    "first_name": f"User{j}",
+                    "last_name": f"Tenant{i}",
+                }
+                for j in range(10)
+            ],
+        )
+        for i in range(args.count)
+    ]
 
     for tenant in tenants:
         create_tenant_database(engine, tenant)

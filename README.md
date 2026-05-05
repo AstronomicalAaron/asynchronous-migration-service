@@ -171,10 +171,15 @@ docker compose up --build
 ```
 Use `-d` for detach mode (containers run in background)
 
+Scale Up Workers
+```shell
+docker compose up --scale worker=10
+```
+
 ### Seed Tenant Databases
 
 ```shell
-docker compose exec api python -m app.seed_tenants
+docker compose exec api python -m app.seed_tenants --count 1000
 ```
 
 ### Verify Tenants Exist (Mongo)

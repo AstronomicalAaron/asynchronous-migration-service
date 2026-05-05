@@ -64,7 +64,6 @@ services:
 
   worker:
     build: .
-    container_name: migration-worker
     command: [ "python", "-m", "app.worker" ]
     volumes:
       - ./app:/app/app
