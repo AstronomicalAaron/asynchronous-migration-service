@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.migrations.base import TenantMigration
+from app.migrations.add_global_user_id_to_users import AddGlobalUserIdToUsers
+from app.migrations.add_phone_number_to_users import AddPhoneNumberToUsers
 
 
 class MigrationRegistry:
@@ -28,3 +30,4 @@ class MigrationRegistry:
 
 registry = MigrationRegistry()
 registry.register(AddGlobalUserIdToUsers())
+registry.register(AddPhoneNumberToUsers())

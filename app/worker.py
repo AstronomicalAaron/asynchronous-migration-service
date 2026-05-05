@@ -7,19 +7,18 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .clients import redis_client
-from .db import SessionLocal
-from .services import MigrationJobService
-from .tenant_db import tenant_session
+from app.clients import redis_client
+from app.db import SessionLocal
+from app.migrations.base import MigrationContext
+from app.migrations.registry import registry
+from app.services import MigrationJobService
+from app.tenant_db import tenant_session
 
 QUEUE_NAME = "migration:jobs"
 POLL_TIMEOUT_SECONDS = 5
-HEARTBEAT_INTERVAL_SECONDS = 10
 BATCH_SIZE = 500
 
 logging.basicConfig(
@@ -29,6 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _should_stop = False
+
 
 def _handle_shutdown(signum: int, frame: Any) -> None:
     del frame
@@ -40,6 +40,7 @@ def _handle_shutdown(signum: int, frame: Any) -> None:
 signal.signal(signal.SIGINT, _handle_shutdown)
 signal.signal(signal.SIGTERM, _handle_shutdown)
 
+
 @dataclass(slots=True)
 class MigrationTask:
     job_id: str
@@ -49,8 +50,15 @@ class MigrationTask:
     dry_run: bool
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "MigrationTask":
-        required_keys = ["jobId", "jobTargetId", "tenantId", "migrationName", "dryRun"]
+    def from_payload(cls, payload: dict[str, Any]) -> MigrationTask:
+        required_keys = [
+            "jobId",
+            "jobTargetId",
+            "tenantId",
+            "migrationName",
+            "dryRun",
+        ]
+
         missing = [key for key in required_keys if key not in payload]
         if missing:
             raise ValueError(f"Missing required task keys: {', '.join(missing)}")
@@ -63,6 +71,7 @@ class MigrationTask:
             dry_run=bool(payload["dryRun"]),
         )
 
+
 @dataclass(slots=True)
 class MigrationExecutionResult:
     records_discovered: int
@@ -70,6 +79,7 @@ class MigrationExecutionResult:
     records_succeeded: int
     records_failed: int
     batches_processed: int
+
 
 def run() -> None:
     logger.info("Worker started. Listening on Redis queue '%s'.", QUEUE_NAME)
@@ -98,6 +108,7 @@ def run() -> None:
 
     logger.info("Worker stopped.")
 
+
 def process_task(task: MigrationTask) -> None:
     logger.info(
         "Processing task job_id=%s job_target_id=%s tenant_id=%s migration_name=%s dry_run=%s",
@@ -112,7 +123,6 @@ def process_task(task: MigrationTask) -> None:
     service = MigrationJobService(db)
 
     try:
-        # Defensive skip for stale Redis messages after local dev resets.
         target = service.target_repo.get_by_job_target_id(task.job_target_id)
         if target is None:
             logger.warning(
@@ -121,7 +131,11 @@ def process_task(task: MigrationTask) -> None:
             )
             return
 
-        service.mark_target_running(job_id=task.job_id, job_target_id=task.job_target_id)
+        service.mark_target_running(
+            job_id=task.job_id,
+            job_target_id=task.job_target_id,
+        )
+
         result = execute_migration(task, service)
 
         service.complete_target(
@@ -135,18 +149,22 @@ def process_task(task: MigrationTask) -> None:
         )
 
         logger.info(
-            "Completed task job_id=%s job_target_id=%s tenant_id=%s",
+            "Completed task job_id=%s job_target_id=%s tenant_id=%s migration_name=%s",
             task.job_id,
             task.job_target_id,
             task.tenant_id,
+            task.migration_name,
         )
+
     except Exception as exc:
         logger.exception(
-            "Task failed job_id=%s job_target_id=%s tenant_id=%s",
+            "Task failed job_id=%s job_target_id=%s tenant_id=%s migration_name=%s",
             task.job_id,
             task.job_target_id,
             task.tenant_id,
+            task.migration_name,
         )
+
         try:
             service.fail_target(
                 job_id=task.job_id,
@@ -162,148 +180,40 @@ def process_task(task: MigrationTask) -> None:
     finally:
         db.close()
 
-def execute_migration(task: MigrationTask, service: MigrationJobService) -> MigrationExecutionResult:
-    if task.migration_name == "add_global_user_id_to_users":
-        return add_global_user_id_to_users(task, service)
 
-    raise ValueError(f"Unsupported migration type: {task.migration_name}")
-
-def add_global_user_id_to_users(
-    task: MigrationTask,
-    service: MigrationJobService,
+def execute_migration(
+        task: MigrationTask,
+        service: MigrationJobService,
 ) -> MigrationExecutionResult:
-    """
-    In-place tenant DB migration.
+    migration = registry.get(task.migration_name)
 
-    Mutates the selected tenant database by:
-    - adding users.global_user_id if missing
-    - backfilling UUIDv4 values for rows where global_user_id is NULL
-    """
-    records_discovered = 0
-    records_processed = 0
-    records_succeeded = 0
-    records_failed = 0
-    batches_processed = 0
-    last_seen_id = 0
-    last_heartbeat_at = time.monotonic()
+    context = MigrationContext(
+        job_id=task.job_id,
+        job_target_id=task.job_target_id,
+        tenant_id=task.tenant_id,
+        migration_name=task.migration_name,
+        dry_run=task.dry_run,
+        batch_size=BATCH_SIZE,
+    )
 
     with tenant_session(task.tenant_id) as tenant_db:
-        ensure_global_user_id_column(tenant_db)
+        validation = migration.validate(tenant_db, context)
+        if not validation.valid:
+            raise ValueError(f"Migration validation failed: {validation.message}")
 
-        count_result = tenant_db.execute(
-            text("SELECT COUNT(*) FROM users WHERE global_user_id IS NULL")
-        )
-        records_discovered = int(count_result.scalar_one())
-
-        while not _should_stop:
-            rows = tenant_db.execute(
-                text(
-                    """
-                    SELECT id
-                    FROM users
-                    WHERE id > :last_seen_id
-                      AND global_user_id IS NULL
-                    ORDER BY id ASC
-                    LIMIT :limit
-                    """
-                ),
-                {"last_seen_id": last_seen_id, "limit": BATCH_SIZE},
-            ).mappings().all()
-
-            if not rows:
-                break
-
-            for row in rows:
-                user_id = int(row["id"])
-
-                try:
-                    if not task.dry_run:
-                        tenant_db.execute(
-                            text(
-                                """
-                                UPDATE users
-                                SET global_user_id = :global_user_id,
-                                    updated_at = NOW()
-                                WHERE id = :user_id
-                                  AND global_user_id IS NULL
-                                """
-                            ),
-                            {
-                                "global_user_id": str(uuid4()),
-                                "user_id": user_id,
-                            },
-                        )
-
-                    records_processed += 1
-                    records_succeeded += 1
-                except Exception as exc:
-                    records_processed += 1
-                    records_failed += 1
-                    service.save_checkpoint(
-                        job_target_id=task.job_target_id,
-                        tenant_id=task.tenant_id,
-                        checkpoint_key=f"failed_user_{user_id}",
-                        checkpoint_value=str(exc),
-                    )
-
-                last_seen_id = user_id
-
-            if not task.dry_run:
-                tenant_db.commit()
-            else:
-                tenant_db.rollback()
-
-            batches_processed += 1
-            service.save_checkpoint(
-                job_target_id=task.job_target_id,
-                tenant_id=task.tenant_id,
-                checkpoint_key="last_processed_user_id",
-                checkpoint_value=str(last_seen_id),
-            )
-
-            now_monotonic = time.monotonic()
-            if now_monotonic - last_heartbeat_at >= HEARTBEAT_INTERVAL_SECONDS or len(rows) < BATCH_SIZE:
-                service.heartbeat_target(
-                    job_id=task.job_id,
-                    job_target_id=task.job_target_id,
-                    records_discovered=records_discovered,
-                    records_processed=records_processed,
-                    records_succeeded=records_succeeded,
-                    records_failed=records_failed,
-                    batches_processed=batches_processed,
-                )
-                last_heartbeat_at = now_monotonic
-
-            if len(rows) < BATCH_SIZE:
-                break
-
-        if _should_stop:
-            raise RuntimeError("Worker interrupted during migration")
-
-        return MigrationExecutionResult(
-            records_discovered=records_discovered,
-            records_processed=records_processed,
-            records_succeeded=records_succeeded,
-            records_failed=records_failed,
-            batches_processed=batches_processed,
+        result = migration.up(
+            tenant_db=tenant_db,
+            service=service,
+            context=context,
         )
 
-def ensure_global_user_id_column(tenant_db: Session) -> None:
-    column_exists = tenant_db.execute(
-        text(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.columns
-            WHERE table_schema = DATABASE()
-              AND table_name = 'users'
-              AND column_name = 'global_user_id'
-            """
-        )
-    ).scalar_one()
-
-    if int(column_exists) == 0:
-        tenant_db.execute(text("ALTER TABLE users ADD COLUMN global_user_id CHAR(36) NULL"))
-        tenant_db.commit()
+    return MigrationExecutionResult(
+        records_discovered=result.records_discovered,
+        records_processed=result.records_processed,
+        records_succeeded=result.records_succeeded,
+        records_failed=result.records_failed,
+        batches_processed=result.batches_processed,
+    )
 
 
 if __name__ == "__main__":

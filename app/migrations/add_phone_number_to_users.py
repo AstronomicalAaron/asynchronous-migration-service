@@ -36,10 +36,10 @@ class AddPhoneNumberToUsers:
     # UP
     # --------------------------------------------------
     def up(
-        self,
-        tenant_db: Session,
-        service: MigrationJobService,
-        context: MigrationContext,
+            self,
+            tenant_db: Session,
+            service: MigrationJobService,
+            context: MigrationContext,
     ) -> MigrationResult:
         del service  # not needed for this migration
 
@@ -78,10 +78,10 @@ class AddPhoneNumberToUsers:
     # DOWN
     # --------------------------------------------------
     def down(
-        self,
-        tenant_db: Session,
-        service: MigrationJobService,
-        context: MigrationContext,
+            self,
+            tenant_db: Session,
+            service: MigrationJobService,
+            context: MigrationContext,
     ) -> MigrationResult:
         del service
 
